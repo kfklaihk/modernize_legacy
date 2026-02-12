@@ -1,0 +1,9 @@
+# Supabase Configuration
+VITE_SUPABASE_URL=https://cbxmshdrjlpvtysgfuuj.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNieG1zaGRyamxwdnR5c2dmdXVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA4NDk4MzksImV4cCI6MjA4NjQyNTgzOX0.RlG_LFyK6IgJwQ0K7Mc_5f46Wj3JoTWiDm6CzkqHS9I
+
+# Marketstack API (for stock data)
+VITE_MARKETSTACK_API_KEY=4b07745ad79b66dfd320697e5e40f596
+
+# DeepSeek API (for AI chatbot)
+VITE_DEEPSEEK_API_KEY=sk-2178c2f0f6314dff83fb7146db8c110a
