@@ -2,7 +2,7 @@ import axios from 'axios';
 import { supabase } from './supabase';
 
 const MARKETSTACK_API_KEY = import.meta.env.VITE_MARKETSTACK_API_KEY;
-const MARKETSTACK_BASE_URL = 'http://api.marketstack.com/v1';
+const MARKETSTACK_BASE_URL = 'https://api.marketstack.com/v2';
 
 export interface StockQuote {
   symbol: string;
@@ -25,24 +25,34 @@ export interface StockQuote {
  * Marketstack uses different symbol formats
  */
 function getMarketstackSymbol(symbol: string, market: string): string {
+  const cleanSymbol = symbol.split('.')[0].toUpperCase();
+
   if (market === 'HK') {
-    // Hong Kong: Add .XHKG suffix
-    // Example: 0005 -> 0005.XHKG
-    const paddedSymbol = symbol.padStart(4, '0');
-    return `${paddedSymbol}.XHKG`;
+    // Marketstack expects 4-digit or 5-digit symbols for HK with .XHKG
+    // If the symbol is 5 digits with a leading zero (e.g., 00001), trim one zero to make it 4 digits (0001)
+    let finalSymbol = cleanSymbol;
+    if (finalSymbol.length === 5 && finalSymbol.startsWith('0')) {
+      finalSymbol = finalSymbol.substring(1);
+    }
+    return `${finalSymbol}.HK`;
   } else if (market === 'CN') {
     // China: Add .XSHG (Shanghai) or .XSHE (Shenzhen)
-    // Default to Shanghai for now
-    return `${symbol}.XSHG`;
+    if (symbol.toUpperCase().endsWith('.XSHE')) return symbol.toUpperCase();
+    if (symbol.toUpperCase().endsWith('.XSHG')) return symbol.toUpperCase();
+
+    // Check if it's likely Shenzhen (starts with 0 or 3) vs Shanghai (starts with 6)
+    if (cleanSymbol.startsWith('0') || cleanSymbol.startsWith('3')) {
+      return `${cleanSymbol}.XSHE`;
+    }
+    return `${cleanSymbol}.XSHG`;
   } else if (market === 'US') {
-    // US stocks: No suffix needed
-    return symbol.toUpperCase();
+    return cleanSymbol;
   }
-  return symbol;
+  return cleanSymbol;
 }
 
 /**
- * Fetch latest EOD (End of Day) stock data from Marketstack
+ * Fetch latest intraday stock data from Marketstack
  */
 export async function getStockQuote(
   symbol: string,
@@ -57,23 +67,23 @@ export async function getStockQuote(
       .eq('market', market)
       .single();
 
-    // If cache is fresh (< 1 hour), return it
+    // If cache is fresh (< 12 hours), return it
     if (cached) {
       const cacheAge = Date.now() - new Date(cached.last_updated).getTime();
-      if (cacheAge < 60 * 60 * 1000) { // 1 hour
+      if (cacheAge < 12 * 60 * 60 * 1000) { // 12 hours
         return {
           symbol: cached.symbol,
           market: cached.market,
           name: cached.name || symbol,
           price: parseFloat(cached.price.toString()),
-          open: parseFloat(cached.price.toString()), // Cache doesn't have these
+          open: parseFloat(cached.price.toString()),
           high: parseFloat(cached.price.toString()),
           low: parseFloat(cached.price.toString()),
           close: parseFloat(cached.price.toString()),
           volume: cached.volume || 0,
           change: cached.change ? parseFloat(cached.change.toString()) : 0,
           change_percent: cached.change_percent ? parseFloat(cached.change_percent.toString()) : 0,
-          date: new Date(cached.last_updated).toISOString().split('T')[0],
+          date: new Date(cached.last_updated).toISOString(),
           lastUpdated: cached.last_updated
         };
       }
@@ -82,7 +92,8 @@ export async function getStockQuote(
     // 2. Fetch from Marketstack API
     const marketstackSymbol = getMarketstackSymbol(symbol, market);
     
-    const response = await axios.get(`${MARKETSTACK_BASE_URL}/eod/latest`, {
+    // Using v2 eod as requested
+    const response = await axios.get(`${MARKETSTACK_BASE_URL}/eod`, {
       params: {
         access_key: MARKETSTACK_API_KEY,
         symbols: marketstackSymbol
@@ -96,20 +107,22 @@ export async function getStockQuote(
 
     const data = response.data.data[0];
     
-    // Calculate change and change percent
-    const change = data.close - data.open;
-    const change_percent = ((change / data.open) * 100);
+    // In EOD, use 'close' as the price
+    const currentPrice = data.close || data.open || data.last;
+    const openPrice = data.open || currentPrice;
+    const change = currentPrice - openPrice;
+    const change_percent = openPrice !== 0 ? ((change / openPrice) * 100) : 0;
 
     const quote: StockQuote = {
       symbol: symbol,
       market: market,
       name: data.symbol || symbol,
-      price: data.close,
-      open: data.open,
-      high: data.high,
-      low: data.low,
-      close: data.close,
-      volume: data.volume,
+      price: currentPrice,
+      open: openPrice,
+      high: data.high || currentPrice,
+      low: data.low || currentPrice,
+      close: data.close || currentPrice,
+      volume: data.volume || 0,
       change: change,
       change_percent: change_percent,
       date: data.date,
@@ -123,10 +136,10 @@ export async function getStockQuote(
         symbol: symbol,
         market: market,
         name: data.symbol,
-        price: data.close,
+        price: currentPrice,
         change: change,
         change_percent: change_percent,
-        volume: data.volume,
+        volume: data.volume || 0,
         last_updated: new Date().toISOString()
       });
 
@@ -181,8 +194,8 @@ export async function getMultipleStocks(
  * Get available exchanges/markets
  */
 export const SUPPORTED_MARKETS = [
-  { code: 'HK', name: 'Hong Kong Stock Exchange', suffix: '.XHKG' },
-  { code: 'CN', name: 'Shanghai Stock Exchange', suffix: '.XSHG' },
+  { code: 'HK', name: 'Hong Kong Stock Exchange', suffix: '.HK' },
+  { code: 'CN', name: 'China Stock Market', suffix: '.XSHG' },
   { code: 'US', name: 'US Stock Market', suffix: '' }
 ];
 

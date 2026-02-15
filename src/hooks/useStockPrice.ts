@@ -8,6 +8,6 @@ export function useStockPrice(symbol: string, market: string) {
     staleTime: 60 * 60 * 1000, // 1 hour (EOD data doesn't change frequently)
     refetchInterval: 60 * 60 * 1000, // Refetch every hour
     enabled: !!symbol && !!market, // Only fetch if both values are provided
-    retry: 2,
+    retry: false,
   });
 }

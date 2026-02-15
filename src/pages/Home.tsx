@@ -1,30 +1,28 @@
 import { useState } from 'react';
-import { Container, Typography, AppBar, Toolbar, Button, Box, Alert, Tabs, Tab } from '@mui/material';
+import { Container, Typography, AppBar, Toolbar, Button, Box, Divider } from '@mui/material';
 import { useAuth } from '../hooks/useAuth';
 import { StockQuote } from '../components/StockQuote';
 import { AIHelper } from '../components/AIHelper';
 import { PortfolioManager } from '../components/PortfolioManager';
-import { TradingInterface } from '../components/TradingInterface';
 import { TransactionHistory } from '../components/TransactionHistory';
-import { LogOut } from 'lucide-react';
+import { LogOut, LayoutDashboard, History, Search } from 'lucide-react';
 
 export function Home() {
   const { user, signOut } = useAuth();
-  const [activeTab, setActiveTab] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const handleTradeComplete = () => {
-    // Refresh portfolio data when trade is completed
+    // Refresh portfolio and transaction history when trade is completed
     setRefreshKey((prev) => prev + 1);
   };
 
   return (
     <>
       {/* App Bar */}
-      <AppBar position="static" elevation={2}>
+      <AppBar position="sticky" elevation={2}>
         <Toolbar>
           <Typography variant="h6" component="div" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
-            📊 Stock Portfolio Manager
+            📊 Simulated Stock Trading System
           </Typography>
           <Typography variant="body2" sx={{ mr: 2, display: { xs: 'none', sm: 'block' } }}>
             {user?.email}
@@ -41,80 +39,43 @@ export function Home() {
         </Toolbar>
       </AppBar>
 
-      {/* Main Content */}
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        {/* Welcome Section */}
-        <Box sx={{ mb: 4 }}>
-          <Typography variant="h4" gutterBottom fontWeight="bold">
-            Welcome back! 👋
-          </Typography>
-          <Typography variant="body1" color="text.secondary">
-            Manage your stock portfolio, execute trades, and track performance across HK, CN, and US markets.
-          </Typography>
+      {/* Main Content - Single Vertical Layout */}
+      <Container maxWidth="xl" sx={{ mt: 4, mb: 10 }}>
+        
+        {/* 1. Portfolio Holdings Section */}
+        <Box sx={{ mb: 6 }} key={`portfolio-${refreshKey}`}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+            <LayoutDashboard size={28} color="#667eea" />
+            <Typography variant="h4" fontWeight="bold">Portfolio Holdings</Typography>
+          </Box>
+          <PortfolioManager />
         </Box>
 
-        {/* Tabs Navigation */}
-        <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-          <Tabs value={activeTab} onChange={(_, newValue) => setActiveTab(newValue)}>
-            <Tab label="Portfolio Overview" />
-            <Tab label="Trading" />
-            <Tab label="Transaction History" />
-            <Tab label="Stock Quotes" />
-          </Tabs>
+        <Divider sx={{ mb: 6 }} />
+
+        {/* 2. Stock Query & Trading Section */}
+        <Box sx={{ mb: 6 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+            <Search size={28} color="#667eea" />
+            <Typography variant="h4" fontWeight="bold">Track Stock</Typography>
+          </Box>
+          <StockQuote onTradeComplete={handleTradeComplete} />
         </Box>
 
-        {/* Tab Content */}
-        {activeTab === 0 && (
-          <Box key={refreshKey}>
-            <Alert severity="info" sx={{ mb: 3 }}>
-              <Typography variant="body2">
-                <strong>Portfolio Management:</strong> View your holdings, track performance, and manage multiple portfolios.
-                Prices are updated from EOD (End of Day) data.
-              </Typography>
-            </Alert>
-            <PortfolioManager />
-          </Box>
-        )}
+        <Divider sx={{ mb: 6 }} />
 
-        {activeTab === 1 && (
-          <Box>
-            <Alert severity="warning" sx={{ mb: 3 }}>
-              <Typography variant="body2">
-                <strong>Trading Interface:</strong> Buy and sell stocks across multiple markets.
-                Transactions update your portfolio holdings in real-time.
-              </Typography>
-            </Alert>
-            <TradingInterface onTradeComplete={handleTradeComplete} />
+        {/* 3. Transaction History Section */}
+        <Box sx={{ mb: 6 }} key={`history-${refreshKey}`}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+            <History size={28} color="#667eea" />
+            <Typography variant="h4" fontWeight="bold">Transaction Log</Typography>
           </Box>
-        )}
-
-        {activeTab === 2 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 3 }}>
-              <Typography variant="body2">
-                <strong>Transaction History:</strong> View all your past trades with detailed information.
-                Filter by portfolio or date to analyze your trading activity.
-              </Typography>
-            </Alert>
-            <TransactionHistory />
-          </Box>
-        )}
-
-        {activeTab === 3 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 3 }}>
-              <Typography variant="body2">
-                <strong>End-of-Day (EOD) Data:</strong> Stock prices shown are from the previous trading day's close.
-                Data is sourced from Marketstack API and updated daily.
-              </Typography>
-            </Alert>
-            <StockQuote />
-          </Box>
-        )}
+          <TransactionHistory />
+        </Box>
 
       </Container>
 
-      {/* AI Helper Chatbot */}
+      {/* AI Helper Chatbot - Movable Popup */}
       <AIHelper />
     </>
   );

@@ -4,7 +4,6 @@ import {
   Card,
   CardContent,
   Typography,
-  Button,
   Table,
   TableBody,
   TableCell,
@@ -13,22 +12,13 @@ import {
   TableRow,
   Paper,
   Chip,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  TextField,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
   Alert,
   CircularProgress,
   Grid,
 } from '@mui/material';
-import { Add, TrendingUp, TrendingDown, Edit, Delete, Refresh } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { TrendingUp, TrendingDown, Wallet } from 'lucide-react';
+import { supabase, convertToUSD, getMarketCurrency, EXCHANGE_RATES } from '../lib/supabase';
+import { useAuth } from '../hooks/useAuth';
 import { getStockQuote } from '../lib/marketstack';
 import type { Portfolio, Holding } from '../lib/supabase';
 
@@ -41,24 +31,34 @@ interface PortfolioWithValue extends Portfolio {
 
 interface HoldingWithPrice extends Holding {
   currentPrice: number;
-  currentValue: number;
-  profitLoss: number;
-  profitLossPercent: number;
+  currentValue: number; // in USD
+  currentValueMarket: number; // in Market Currency
+  profitLoss: number; // in USD
+  currency: string;
   stockName: string;
+  transactionType: 'buy' | 'sell'; // from transactions
+  transactionDate: string;
+  transactionPrice: number;
+  positionType: 'buy' | 'sell'; // computed: 'buy' if shares > 0, 'sell' if shares < 0
 }
 
 export function PortfolioManager() {
+  const { profile, refreshProfile } = useAuth();
   const [portfolios, setPortfolios] = useState<PortfolioWithValue[]>([]);
   const [selectedPortfolio, setSelectedPortfolio] = useState<string | null>(null);
   const [holdings, setHoldings] = useState<HoldingWithPrice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [newPortfolioName, setNewPortfolioName] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
+
+  const [longValue, setLongValue] = useState(0);  // Buy stocks value
+  const [shortValue, setShortValue] = useState(0); // Sell stocks value (absolute)
 
   useEffect(() => {
-    loadPortfolios();
-  }, []);
+    if (profile?.id) {
+      loadPortfolios();
+    } else {
+      setLoading(false);
+    }
+  }, [profile?.id]);
 
   useEffect(() => {
     if (selectedPortfolio) {
@@ -67,11 +67,13 @@ export function PortfolioManager() {
   }, [selectedPortfolio]);
 
   const loadPortfolios = async () => {
+    if (!profile?.id) return;
     try {
       setLoading(true);
       const { data: portfoliosData, error } = await supabase
         .from('portfolios')
         .select('*')
+        .eq('user_id', profile.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -91,13 +93,15 @@ export function PortfolioManager() {
             for (const holding of holdingsData) {
               try {
                 const quote = await getStockQuote(holding.symbol, holding.market);
-                const currentValue = holding.shares * quote.price;
-                const cost = holding.shares * holding.average_cost;
-                totalValue += currentValue;
-                totalCost += cost;
+                const currentValueUSD = convertToUSD(holding.shares * quote.price, holding.market);
+                const costUSD = convertToUSD(holding.shares * holding.average_cost, holding.market);
+                totalValue += currentValueUSD;
+                totalCost += costUSD;
               } catch (error) {
                 console.error(`Error fetching price for ${holding.symbol}:`, error);
-                totalCost += holding.shares * holding.average_cost;
+                const costUSD = convertToUSD(holding.shares * holding.average_cost, holding.market);
+                totalCost += costUSD;
+                totalValue += costUSD; // Fallback
               }
             }
           }
@@ -128,92 +132,131 @@ export function PortfolioManager() {
 
   const loadHoldings = async (portfolioId: string) => {
     try {
-      setRefreshing(true);
-      const { data: holdingsData, error } = await supabase
+      // Fetch transactions for reference (newest first)
+      const { data: transactionsData, error: txError } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('portfolio_id', portfolioId)
+        .order('transaction_date', { ascending: false });
+
+      if (txError) {
+        console.error('Transaction fetch error:', txError);
+      }
+
+      // Fetch holdings - IMPORTANT: this is the main data source
+      const { data: holdingsData, error: hError } = await supabase
         .from('holdings')
         .select('*')
         .eq('portfolio_id', portfolioId);
 
-      if (error) throw error;
+      if (hError) {
+        console.error('Holdings fetch error:', hError);
+        throw hError;
+      }
+
+      console.log('Holdings fetched:', holdingsData?.length || 0, 'records');
+
+      let totalLong = 0;
+      let totalShort = 0;
+
+      if (!holdingsData || holdingsData.length === 0) {
+        setHoldings([]);
+        setLongValue(0);
+        setShortValue(0);
+        refreshProfile();
+        return;
+      }
 
       const holdingsWithPrices = await Promise.all(
-        (holdingsData || []).map(async (holding) => {
+        holdingsData.map(async (holding) => {
           try {
             const quote = await getStockQuote(holding.symbol, holding.market);
             const currentPrice = quote.price;
-            const currentValue = holding.shares * currentPrice;
-            const cost = holding.shares * holding.average_cost;
-            const profitLoss = currentValue - cost;
-            const profitLossPercent = cost > 0 ? (profitLoss / cost) * 100 : 0;
+            const currentValueMarket = holding.shares * currentPrice;
+            const currentValueUSD = convertToUSD(currentValueMarket, holding.market);
+            
+            const costMarket = holding.shares * holding.average_cost;
+            const costUSD = convertToUSD(costMarket, holding.market);
+            
+            const profitLossUSD = currentValueUSD - costUSD;
+
+            // Get latest transaction(s) for this holding
+            const holdingTxs = transactionsData?.filter(
+              (tx) => tx.symbol === holding.symbol && tx.market === holding.market
+            ) || [];
+            
+            const lastTx = holdingTxs[0]; // Already sorted by transaction_date desc
+
+            // Determine position type: buy = shares > 0, sell = shares < 0
+            const positionType: 'buy' | 'sell' = holding.shares >= 0 ? 'buy' : 'sell';
+
+            // Track long/short values
+            if (holding.shares > 0) {
+              totalLong += currentValueUSD;
+            } else if (holding.shares < 0) {
+              totalShort += Math.abs(currentValueUSD);
+            }
 
             return {
               ...holding,
               currentPrice,
-              currentValue,
-              profitLoss,
-              profitLossPercent,
+              currentValue: currentValueUSD,
+              currentValueMarket,
+              profitLoss: profitLossUSD,
+              currency: getMarketCurrency(holding.market),
               stockName: quote.name,
+              transactionType: lastTx?.type || positionType,
+              transactionDate: lastTx?.transaction_date || holding.created_at,
+              transactionPrice: lastTx?.price || holding.average_cost,
+              positionType,
             };
           } catch (error) {
             console.error(`Error fetching price for ${holding.symbol}:`, error);
+            const costUSD = convertToUSD(holding.shares * holding.average_cost, holding.market);
+            
+            // Still track in long/short even on error
+            if (holding.shares > 0) {
+              totalLong += costUSD;
+            } else if (holding.shares < 0) {
+              totalShort += Math.abs(costUSD);
+            }
+
+            const lastTx = transactionsData?.find(
+              (tx) => tx.symbol === holding.symbol && tx.market === holding.market
+            );
+
+            const positionType: 'buy' | 'sell' = holding.shares >= 0 ? 'buy' : 'sell';
+
             return {
               ...holding,
               currentPrice: holding.average_cost,
-              currentValue: holding.shares * holding.average_cost,
+              currentValue: costUSD,
+              currentValueMarket: holding.shares * holding.average_cost,
               profitLoss: 0,
-              profitLossPercent: 0,
+              currency: getMarketCurrency(holding.market),
               stockName: holding.symbol,
+              transactionType: lastTx?.type || positionType,
+              transactionDate: lastTx?.transaction_date || holding.created_at,
+              transactionPrice: lastTx?.price || holding.average_cost,
+              positionType,
             };
           }
         })
       );
 
+      console.log('Holdings with prices computed:', holdingsWithPrices.length);
       setHoldings(holdingsWithPrices);
+      setLongValue(totalLong);
+      setShortValue(totalShort);
+      refreshProfile();
     } catch (error) {
       console.error('Error loading holdings:', error);
-    } finally {
-      setRefreshing(false);
+      setHoldings([]);
+      setLongValue(0);
+      setShortValue(0);
     }
   };
 
-  const createPortfolio = async () => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { error } = await supabase.from('portfolios').insert({
-        user_id: user.id,
-        name: newPortfolioName,
-        description: '',
-      });
-
-      if (error) throw error;
-
-      setNewPortfolioName('');
-      setCreateDialogOpen(false);
-      loadPortfolios();
-    } catch (error) {
-      console.error('Error creating portfolio:', error);
-    }
-  };
-
-  const deletePortfolio = async (portfolioId: string) => {
-    if (!confirm('Are you sure you want to delete this portfolio?')) return;
-
-    try {
-      const { error } = await supabase
-        .from('portfolios')
-        .delete()
-        .eq('id', portfolioId);
-
-      if (error) throw error;
-
-      setSelectedPortfolio(null);
-      loadPortfolios();
-    } catch (error) {
-      console.error('Error deleting portfolio:', error);
-    }
-  };
 
   if (loading) {
     return (
@@ -227,213 +270,152 @@ export function PortfolioManager() {
 
   return (
     <Box>
-      {/* Portfolio Selector */}
-      <Box sx={{ mb: 3, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-        <Typography variant="h5" fontWeight="bold">
-          My Portfolios
+      {/* Exchange Rate Info */}
+      <Paper sx={{ p: 2, mb: 3, bgcolor: 'info.50' }}>
+        <Typography variant="body2" color="text.secondary">
+          <strong>Exchange Rates:</strong> 1 USD = {EXCHANGE_RATES.USD_TO_HKD} HKD | 1 HKD = {EXCHANGE_RATES.HKD_TO_CNY} CNY
         </Typography>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={() => setCreateDialogOpen(true)}
-        >
-          Create Portfolio
-        </Button>
-      </Box>
+      </Paper>
 
-      {/* Portfolio Cards */}
+      {/* Portfolio Value Cards */}
       <Grid container spacing={2} sx={{ mb: 3 }}>
-        {portfolios.map((portfolio) => (
-          <Grid item xs={12} sm={6} md={4} key={portfolio.id}>
-            <Card
-              sx={{
-                cursor: 'pointer',
-                border: selectedPortfolio === portfolio.id ? '2px solid' : '1px solid',
-                borderColor: selectedPortfolio === portfolio.id ? 'primary.main' : 'divider',
-              }}
-              onClick={() => setSelectedPortfolio(portfolio.id)}
-            >
-              <CardContent>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="h6" fontWeight="bold">
-                    {portfolio.name}
-                  </Typography>
-                  <IconButton
-                    size="small"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deletePortfolio(portfolio.id);
-                    }}
-                  >
-                    <Delete size={18} />
-                  </IconButton>
-                </Box>
-
-                <Typography variant="h5" fontWeight="bold" sx={{ mb: 1 }}>
-                  ${portfolio.totalValue.toFixed(2)}
+        {/* Cash Balance Card */}
+        <Grid item xs={12} sm={6} md={4}>
+          <Card sx={{ bgcolor: 'secondary.light', color: 'white', height: '100%' }}>
+            <CardContent sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                <Wallet size={20} />
+                <Typography variant="body2" fontWeight="bold">
+                  Cash (USD)
                 </Typography>
+              </Box>
+              <Typography 
+                sx={{ 
+                  fontSize: 'clamp(1.5rem, 6vw, 2.5rem)', 
+                  fontWeight: 'bold',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ${profile?.cash_balance?.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
 
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  {portfolio.profitLoss >= 0 ? (
-                    <TrendingUp size={16} color="green" />
-                  ) : (
-                    <TrendingDown size={16} color="red" />
-                  )}
-                  <Typography
-                    variant="body2"
-                    color={portfolio.profitLoss >= 0 ? 'success.main' : 'error.main'}
-                    fontWeight="bold"
-                  >
-                    {portfolio.profitLoss >= 0 ? '+' : ''}${portfolio.profitLoss.toFixed(2)} (
-                    {portfolio.profitLossPercent.toFixed(2)}%)
-                  </Typography>
-                </Box>
-
-                <Typography variant="caption" color="text.secondary">
-                  Cost: ${portfolio.totalCost.toFixed(2)}
+        {/* Long (Buy) Portfolio Card */}
+        <Grid item xs={12} sm={6} md={4}>
+          <Card sx={{ bgcolor: 'success.light', color: 'white', height: '100%' }}>
+            <CardContent sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                <TrendingUp size={20} />
+                <Typography variant="body2" fontWeight="bold">
+                  Buy Portfolio ($)
                 </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-        ))}
+              </Box>
+              <Typography 
+                sx={{ 
+                  fontSize: 'clamp(1.5rem, 6vw, 2.5rem)', 
+                  fontWeight: 'bold',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ${longValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Short (Sell) Portfolio Card */}
+        <Grid item xs={12} sm={6} md={4}>
+          <Card sx={{ bgcolor: 'error.light', color: 'white', height: '100%' }}>
+            <CardContent sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                <TrendingDown size={20} />
+                <Typography variant="body2" fontWeight="bold">
+                  Sell Portfolio ($)
+                </Typography>
+              </Box>
+              <Typography 
+                sx={{ 
+                  fontSize: 'clamp(1.5rem, 6vw, 2.5rem)', 
+                  fontWeight: 'bold',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ${shortValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+
       </Grid>
 
       {/* Holdings Table */}
       {currentPortfolio && (
-        <Paper elevation={2} sx={{ p: 3 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-            <Typography variant="h6" fontWeight="bold">
-              Holdings - {currentPortfolio.name}
-            </Typography>
-            <Button
-              startIcon={refreshing ? <CircularProgress size={16} /> : <Refresh />}
-              onClick={() => loadHoldings(selectedPortfolio!)}
-              disabled={refreshing}
-              size="small"
-            >
-              Refresh Prices
-            </Button>
-          </Box>
+        <Paper elevation={2} sx={{ p: 2 }}>
+          <Typography variant="h6" fontWeight="bold" sx={{ mb: 2 }}>
+            Holdings
+          </Typography>
 
           {holdings.length === 0 ? (
             <Alert severity="info">
-              No holdings yet. Use the trading interface below to buy stocks.
+              No holdings yet. Use the trading interface below to buy or sell stocks.
             </Alert>
           ) : (
-            <TableContainer>
-              <Table>
+            <TableContainer sx={{ maxHeight: 500 }}>
+              <Table stickyHeader>
                 <TableHead>
-                  <TableRow>
-                    <TableCell>Symbol</TableCell>
-                    <TableCell>Name</TableCell>
-                    <TableCell>Market</TableCell>
-                    <TableCell align="right">Shares</TableCell>
-                    <TableCell align="right">Avg Cost</TableCell>
-                    <TableCell align="right">Current Price</TableCell>
-                    <TableCell align="right">Market Value</TableCell>
-                    <TableCell align="right">P&L</TableCell>
-                    <TableCell align="right">P&L %</TableCell>
+                  <TableRow sx={{ bgcolor: 'primary.light' }}>
+                    <TableCell><strong>Buy/Sell</strong></TableCell>
+                    <TableCell><strong>Stock Code</strong></TableCell>
+                    <TableCell><strong>Stock Name</strong></TableCell>
+                    <TableCell><strong>Transaction Date</strong></TableCell>
+                    <TableCell align="right"><strong>Transaction Price</strong></TableCell>
+                    <TableCell align="right"><strong>Number of Shares</strong></TableCell>
+                    <TableCell align="right"><strong>Latest EOD Price</strong></TableCell>
+                    <TableCell><strong>Currency</strong></TableCell>
+                    <TableCell align="right"><strong>Gain/Loss Amount</strong></TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {holdings.map((holding) => (
-                    <TableRow key={holding.id}>
+                    <TableRow key={holding.id} hover>
                       <TableCell>
-                        <Typography fontWeight="bold">{holding.symbol}</Typography>
+                        <Chip
+                          label={holding.positionType.toUpperCase()}
+                          color={holding.positionType === 'buy' ? 'success' : 'error'}
+                          size="small"
+                        />
                       </TableCell>
+                      <TableCell sx={{ fontWeight: 'bold' }}>{holding.symbol}</TableCell>
                       <TableCell>{holding.stockName}</TableCell>
-                      <TableCell>
-                        <Chip label={holding.market} size="small" />
-                      </TableCell>
-                      <TableCell align="right">{holding.shares.toLocaleString()}</TableCell>
-                      <TableCell align="right">${holding.average_cost.toFixed(2)}</TableCell>
-                      <TableCell align="right">${holding.currentPrice.toFixed(2)}</TableCell>
-                      <TableCell align="right">
-                        <Typography fontWeight="bold">
-                          ${holding.currentValue.toFixed(2)}
-                        </Typography>
-                      </TableCell>
+                      <TableCell>{new Date(holding.transactionDate).toLocaleDateString()}</TableCell>
+                      <TableCell align="right">{holding.transactionPrice?.toFixed(4) ?? '0.00'}</TableCell>
+                      <TableCell align="right">{Math.abs(holding.shares).toLocaleString()}</TableCell>
+                      <TableCell align="right">{holding.currentPrice?.toFixed(4) ?? '0.00'}</TableCell>
+                      <TableCell>{holding.currency}</TableCell>
                       <TableCell align="right">
                         <Typography
-                          color={holding.profitLoss >= 0 ? 'success.main' : 'error.main'}
                           fontWeight="bold"
+                          color={holding.profitLoss >= 0 ? 'success.main' : 'error.main'}
                         >
                           {holding.profitLoss >= 0 ? '+' : ''}${holding.profitLoss.toFixed(2)}
                         </Typography>
                       </TableCell>
-                      <TableCell align="right">
-                        <Typography
-                          color={holding.profitLossPercent >= 0 ? 'success.main' : 'error.main'}
-                          fontWeight="bold"
-                        >
-                          {holding.profitLossPercent >= 0 ? '+' : ''}
-                          {holding.profitLossPercent.toFixed(2)}%
-                        </Typography>
-                      </TableCell>
                     </TableRow>
                   ))}
-                  <TableRow>
-                    <TableCell colSpan={6} align="right">
-                      <Typography variant="h6" fontWeight="bold">
-                        Total:
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography variant="h6" fontWeight="bold">
-                        ${currentPortfolio.totalValue.toFixed(2)}
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography
-                        variant="h6"
-                        fontWeight="bold"
-                        color={currentPortfolio.profitLoss >= 0 ? 'success.main' : 'error.main'}
-                      >
-                        {currentPortfolio.profitLoss >= 0 ? '+' : ''}$
-                        {currentPortfolio.profitLoss.toFixed(2)}
-                      </Typography>
-                    </TableCell>
-                    <TableCell align="right">
-                      <Typography
-                        variant="h6"
-                        fontWeight="bold"
-                        color={
-                          currentPortfolio.profitLossPercent >= 0 ? 'success.main' : 'error.main'
-                        }
-                      >
-                        {currentPortfolio.profitLossPercent >= 0 ? '+' : ''}
-                        {currentPortfolio.profitLossPercent.toFixed(2)}%
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
                 </TableBody>
               </Table>
             </TableContainer>
           )}
         </Paper>
       )}
-
-      {/* Create Portfolio Dialog */}
-      <Dialog open={createDialogOpen} onClose={() => setCreateDialogOpen(false)}>
-        <DialogTitle>Create New Portfolio</DialogTitle>
-        <DialogContent>
-          <TextField
-            autoFocus
-            margin="dense"
-            label="Portfolio Name"
-            fullWidth
-            value={newPortfolioName}
-            onChange={(e) => setNewPortfolioName(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && createPortfolio()}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
-          <Button onClick={createPortfolio} variant="contained" disabled={!newPortfolioName}>
-            Create
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

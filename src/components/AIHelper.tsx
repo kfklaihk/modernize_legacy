@@ -16,8 +16,52 @@ import { EXAMPLE_QUESTIONS } from '../lib/deepseek';
 export function AIHelper() {
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
+  const [position, setPosition] = useState({ x: 24, y: 24 }); // Bottom and right offsets
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+
   const { messages, loading, sendMessage, clearMessages } = useAI();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    setIsDragging(true);
+    dragStartRef.current = {
+      x: e.clientX + position.x,
+      y: e.clientY + position.y
+    };
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      
+      const newX = dragStartRef.current.x - e.clientX;
+      const newY = dragStartRef.current.y - e.clientY;
+      
+      // Boundaries
+      const maxX = window.innerWidth - 424;
+      const maxY = window.innerHeight - 624;
+      
+      setPosition({
+        x: Math.max(0, Math.min(maxX, newX)),
+        y: Math.max(0, Math.min(maxY, newY))
+      });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -59,18 +103,20 @@ export function AIHelper() {
           elevation={8}
           sx={{
             position: 'fixed',
-            bottom: 24,
-            right: 24,
+            bottom: position.y,
+            right: position.x,
             width: 400,
             height: 600,
             display: 'flex',
             flexDirection: 'column',
             zIndex: 1000,
             maxWidth: 'calc(100vw - 48px)',
+            transition: isDragging ? 'none' : 'bottom 0.2s, right 0.2s',
           }}
         >
-          {/* Header */}
+          {/* Header - Movable area */}
           <Box
+            onMouseDown={handleMouseDown}
             sx={{
               p: 2,
               background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
@@ -78,6 +124,8 @@ export function AIHelper() {
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
+              cursor: 'move',
+              userSelect: 'none',
             }}
           >
             <Box>

@@ -30,6 +30,7 @@ export function Auth() {
             },
           }}
           providers={['google']}
+          onlyThirdPartyProviders={false}
           redirectTo={window.location.origin}
         />
 
